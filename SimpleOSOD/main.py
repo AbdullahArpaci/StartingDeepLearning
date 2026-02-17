@@ -3,7 +3,7 @@ import torch.nn as nn
 import torchvision
 from torch.utils.data import DataLoader,Dataset
 import torch.optim as optim
-import torch.functional as F
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import random
 import os
@@ -12,6 +12,8 @@ import torchvision.transforms as T
 from torchvision import models
 import torchvision.datasets as dset
 import numpy as np
+
+
 device = "cpu"
 if torch.cuda.is_available():
     device = "cuda"
@@ -97,6 +99,77 @@ class SiameseCOCOWrapper(Dataset):
     def __len__(self):
         return 3000
 
+class SiameseNETWORK(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
+        resnet.fc = nn.Identity()
+
+        self.backbone = resnet
+
+
+        self.sequential = nn.Sequential(
+            nn.Linear(2048,512),
+            nn.ReLU(),
+            nn.Linear(512,128)
+        )
+    def forward_once(self,x):
+        x = self.backbone(x)
+        x = self.sequential(x)
+        return F.normalize(x, p=2, dim=1)
+
+    def forward(self,image1,image2):
+        return self.forward_once(image1),self.forward_once(image2)
+
+
+def train_model(epochs, optimizer, loss_function, model, train_loader):
+    train_loss_history = []
+    model.train()
+
+    for epoch in range(epochs):
+        total_loss = 0
+        for i, (image1, image2, target) in enumerate(train_loader):
+            image1, image2, target = image1.to(device), image2.to(device), target.to(device)
+
+            optimizer.zero_grad()
+
+            output1, output2 = model(image1, image2)
+            loss = loss_function(output1, output2, target)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+            if i % 20 == 0:
+                print(f"Epoch [{epoch + 1}/{epochs}], Step [{i}/{len(train_loader)}], Loss: {loss.item():.4f}")
+
+        avg_loss = total_loss / len(train_loader)
+        train_loss_history.append(avg_loss)
+        print(f"--- Epoch {epoch + 1} Bitti, Ortalama Loss = {avg_loss:.4f} ---")
+
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(range(1, epochs + 1), train_loss_history, marker="o", color="b")
+    plt.title("Eğitim Kayıp Grafiği (Training Loss)")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.grid(True)
+    plt.show()
+
+class ConstructiveLoss(nn.Module):
+    def __init__(self,margin = 2.0):
+        super().__init__()
+        self.margin = margin
+
+    def forward(self,output1,output2,target):
+        target = target.view(-1)
+        euclidean_distance = F.pairwise_distance(output1,output2)
+        loss_contrastive = torch.mean(target * torch.pow(euclidean_distance,2) + (1.0-target) * torch.pow(torch.clamp(self.margin - euclidean_distance,min = 0.0),2))
+
+        return loss_contrastive
+
+
 def get_data_loader(root_direct,ann_file,batch_size = 32):
 
     transform = T.Compose([
@@ -118,28 +191,24 @@ def get_data_loader(root_direct,ann_file,batch_size = 32):
     return train_dataloader,test_dataloader
 
 def visualize_data(loader, n=5):
-    # Dataloader'dan bir batch çek
     img1, img2, target = next(iter(loader))
 
-    # Figür oluştur
+
     fig, axes = plt.subplots(2, n, figsize=(15, 6))
 
-    # --- ResNet Normalizasyonunu Geri Alma (Görüntü düzgün çıksın diye) ---
-    # Bu değerler PyTorch standartlarıdır
     mean = np.array([0.485, 0.456, 0.406])
     std = np.array([0.229, 0.224, 0.225])
 
     def unnormalize(tensor_img):
-        # 1. (C, H, W) -> (H, W, C) yap (Matplotlib formatı)
+
         img = tensor_img.permute(1, 2, 0).numpy()
-        # 2. Renkleri geri aç (x * std + mean)
+
         img = img * std + mean
-        # 3. 0-1 arasına sıkıştır (Hata vermemesi için)
+
         return np.clip(img, 0, 1)
 
     for i in range(n):
-        # --- Resim 1 (Üst Satır) ---
-        # HATA 1 & 2 Düzeltildi: axes[0, i].imshow(...) kullanıldı ve boyut düzeltildi
+
         axes[0, i].imshow(unnormalize(img1[i]))
         axes[0, i].axis("off")
 
@@ -147,8 +216,6 @@ def visualize_data(loader, n=5):
         axes[1, i].imshow(unnormalize(img2[i]))
         axes[1, i].axis("off")
 
-        # --- Başlık (HATA 3 Düzeltildi) ---
-        # target[i].item() ile sadece o resmin etiketine bakıyoruz
         label = target[i].item()
         if label == 1.0:
             axes[0, i].set_title(f"Çift {i+1}: AYNI", color="green", fontweight="bold")
@@ -163,3 +230,7 @@ if "__main__" == __name__:
     ann_dir = r"C:\Users\arpac\Desktop\2025-2026\DataSetss\annotations_trainval2017\annotations\instances_train2017.json"
     train_dataloader,test_dataloader = get_data_loader(root_direct=root_dir,ann_file=ann_dir)
     visualize_data(train_dataloader,10)
+    MyModel = SiameseNETWORK().to(device)
+    loss_function = ConstructiveLoss()
+    optimizer = optim.Adam(MyModel.parameters(),lr = 0.0001)
+    train_model(5,optimizer,loss_function,MyModel,train_dataloader)
